@@ -27,3 +27,5 @@ y libro vigente.
 
 Este repo comparte el grafo privado [Nakamotito Knowledge](docs/KNOWLEDGE_GRAPH.md) con
 Nakamotito Trading; comparte conocimiento, no runtime ni interfaz.
+
+Para retomar trabajo, leer primero el [relevo del proyecto](docs/HANDOFF-2026-09-09.md).
