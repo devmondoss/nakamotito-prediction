@@ -22,3 +22,8 @@ cargo run --release --bin prediction_clob_watch
 La siguiente entrega es la ventana nativa propia que inicia, vigila y compone ambos watchers.
 Antes de añadir cualquier forecast se validará la salud del feed, transición de rondas, timestamps
 y libro vigente.
+
+## Knowledge Graph
+
+Este repo comparte el grafo privado [Nakamotito Knowledge](docs/KNOWLEDGE_GRAPH.md) con
+Nakamotito Trading; comparte conocimiento, no runtime ni interfaz.
