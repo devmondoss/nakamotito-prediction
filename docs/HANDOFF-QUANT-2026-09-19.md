@@ -150,3 +150,41 @@ contractual; no hay señal direccional ni afirmación de edge.
   puerta de la fase 3 y sigue abierto para la siguiente sesión.
 - **cargo test**: ahora 42 pruebas en total (20 de `src/lib.rs`, más 5+4+3+4 de los cuatro
   collectors nuevos, más las ya existentes), 9 binarios compilan.
+
+## Adenda 4 — normalización de los 4 venues, consola completa, y pausa para cerrar hipótesis (misma fecha)
+
+- **`normalized-event-v1` extendido** a los 4 venues nuevos (extracción de reloj por
+  tipo de mensaje: `aggTrade`/`markPrice` de Binance, `ts` uniforme de Bybit). Validando
+  esto contra una sesión real de 200s con las 6 fuentes a la vez apareció un bug real:
+  la regla de calidad marcaba `INVALID` cualquier latencia de reloj negativa, y eso
+  clasificó 81% de una sesión real como inválida por simple desfase de reloj entre
+  máquinas (hasta 64ms observado). Se corrigió con una tolerancia de 250ms documentada.
+- **Consola actualizada para los 6 watchers**: antes solo conocía 2 (oracle, CLOB) de
+  forma hardcodeada; ahora itera una tabla de `WatcherDef` y expone todos los feeds en
+  `/api/snapshot` bajo `feeds.<key>`. El HTML tiene un panel nuevo de multi-venue.
+  De paso se encontró y arregló un bug real: la consola solo escuchaba SIGINT, así que
+  un `kill` normal (SIGTERM) la mataba sin correr el shutdown, dejando watchers
+  huérfanos — pasó en vivo en esta misma sesión (un watcher del CLOB quedó capturando
+  ~7.5 horas sin supervisión, 2.1 GB). Ahora escucha ambas señales.
+- **Se pausó a propósito la campaña de captura larga que seguía como siguiente paso.**
+  El usuario pidió cerrar primero la hipótesis de estrategia y el motivo real del
+  multi-venue antes de gastar disco. Se investigó (búsqueda web + verificación contra
+  RAW propio) y se documentó en
+  [RESEARCH-NOTES-2026-09-19-TWAP-ORIGIN-AND-MULTI-VENUE-SCOPE.md](RESEARCH-NOTES-2026-09-19-TWAP-ORIGIN-AND-MULTI-VENUE-SCOPE.md):
+  el TWAP de Polymarket no siempre existió — lo adoptaron el 2026-08-07 tras un paper de
+  Stanford/SMU que documentó $8.2M en manipulación de settlement empujando el precio de
+  **Binance** en los últimos 10s de cada ronda bajo el mecanismo anterior. Esto da una
+  razón mecánica (no supuesta) de por qué Binance/Bybit son la prioridad de observación
+  y no una lista larga de exchanges, y abre un caso de uso nuevo (detección de
+  manipulación residual bajo el régimen TWAP, no replicarla). También se encontró una
+  discrepancia real: la prensa dice ventana de 30s para el mercado de 5 min; las 13
+  rondas que tenemos capturadas dicen 60s unánimemente — se documentó, sin resolver la
+  causa contra fuente oficial.
+- La estrategia completa (qué significa "ganar", arquitectura de dos modelos `Ĉ(t)`/`q(t)`,
+  de dónde vendría el edge) quedó consolidada en
+  [BITACORA-2026-09-19.md](BITACORA-2026-09-19.md), que es ahora el punto de entrada
+  recomendado para cualquier agente que retome esto en frío.
+- **Próximo paso real, antes de fase 4:** decidir la duración/presupuesto de la campaña
+  de captura (con los ~1.36 GB/hora ya medidos) y diseñarla alrededor de la ventana de
+  settlement de 60s de cada ronda, no solo "capturar tiempo continuo" — luego sí, el
+  estudio de lead-lag que cierra la puerta de fase 3.

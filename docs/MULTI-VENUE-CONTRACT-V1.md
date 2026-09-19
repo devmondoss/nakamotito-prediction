@@ -16,6 +16,23 @@ microestructura para `q(t)`, y una señal de divergencia/calidad independiente. 
 [RESEARCH-NOTES-2026-09-19-ORDER-FLOW-AND-GREEKS.md](RESEARCH-NOTES-2026-09-19-ORDER-FLOW-AND-GREEKS.md)
 para la discusión completa de esta distinción.
 
+## Por qué Binance y Bybit, y no una lista larga de exchanges
+
+No es un punto de partida arbitrario ni una lista incompleta a rellenar después. Un
+paper de Stanford/SMU sobre manipulación de settlement en Polymarket
+([detalle completo aquí](RESEARCH-NOTES-2026-09-19-TWAP-ORIGIN-AND-MULTI-VENUE-SCOPE.md))
+documentó que, en el mecanismo de settlement que Polymarket usó antes de agosto 2026,
+manipuladores movían específicamente el precio spot de **Binance** en los últimos
+segundos de cada ronda para forzar el resultado — porque Binance domina el volumen y, a
+horizontes de minutos, el arbitraje mantiene su precio pegado al del oracle combinado a
+pocos basis points. Eso da una razón mecánica, no supuesta, de por qué Binance es la
+primera prioridad de observación, con Bybit como segunda fuente razonable. Herramientas
+que agregan 15-20 exchanges en un solo libro (tipo "Order Book Walls") son útiles para
+visualización de liquidez, pero no hay evidencia de que sumar esos venues aporte señal
+predictiva adicional relevante para este mecanismo específico a este horizonte —
+extenderse ahí requeriría demostrar contribución incremental medida (ablación), no
+completar una lista.
+
 ## Los cuatro collectors
 
 | Binario | Venue | WS | Qué observa |

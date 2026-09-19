@@ -325,3 +325,25 @@ sobre una hipótesis no demostrada.
 - [Límite epistemológico de GEX/dealer hedging](../../nakamotito-knowledge/13-Opciones/GEX-Estimado-y-Dealer-Hedging.md)
 - [Walk-forward, purge y embargo](../../nakamotito-knowledge/11-Quant-y-Estadistica/Walk-Forward-Purge-Embargo.md)
 - [Estudio de expiración BTC y gamma](https://www.sciencedirect.com/science/article/pii/S1544612326008688)
+
+## Adenda de investigación — 2026-09-19: por qué Binance/Bybit y no una lista larga de venues
+
+Investigación externa (no cambia la aprobación de fases 0-2 ni autoriza fases nuevas)
+encontró el motivo mecánico exacto de por qué la cohorte B (sección 4) prioriza
+Binance+Bybit en vez de agregar de entrada las ~15-20 fuentes que ofrecen herramientas
+de agregación de libro tipo "Order Book Walls": un paper de Stanford/SMU
+(["Settlement Manipulation in Prediction Markets", arXiv:2606.31675](https://arxiv.org/abs/2606.31675))
+documentó que, bajo el mecanismo de settlement anterior de Polymarket, manipuladores
+extrajeron $8.2M empujando el precio spot de **Binance específicamente** en los últimos
+10 segundos de cada ronda — porque Binance domina el volumen y, a horizontes de minutos,
+el arbitraje mantiene su precio pegado al del oracle combinado a pocos basis points.
+Polymarket migró a Chainlink TWAP (ventana completa) el 2026-08-07 en respuesta directa
+a ese hallazgo. Esto confirma con evidencia mecánica, no supuesta, que observar Binance
+en tiempo real no es "una fuente más entre varias equivalentes": es la fuente con mayor
+peso causal conocido sobre lo que el TWAP terminará promediando. También abre un caso de
+uso no contemplado en la versión original de este plan: **detección de manipulación
+residual** (flujo unidireccional anómalo sostenido en la ventana de settlement) como
+flag de calidad, no como señal direccional. Detalle completo, incluida una discrepancia
+real encontrada entre lo que reporta la prensa (ventana de 30s) y lo que declaran
+nuestras propias 13 rondas capturadas (60s, unánime), en
+[RESEARCH-NOTES-2026-09-19-TWAP-ORIGIN-AND-MULTI-VENUE-SCOPE.md](RESEARCH-NOTES-2026-09-19-TWAP-ORIGIN-AND-MULTI-VENUE-SCOPE.md).
