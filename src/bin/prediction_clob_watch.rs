@@ -298,6 +298,14 @@ fn write_snapshot(
     Ok(())
 }
 
+/// Por qué terminó el bucle de streaming de una ronda. Un `Rollover` es un evento
+/// esperado cada 5 minutos y se maneja distinto de un `Error` real: no debe acumular
+/// reintentos ni esperar el backoff pensado para fallas de red.
+enum StreamExit {
+    Rollover,
+    Error(String),
+}
+
 /// Exponential backoff limits retry pressure while a remote endpoint or the route to it is down.
 /// It is intentionally bounded: recovery remains prompt when the service returns.
 fn retry_delay(reconnects: u64) -> Duration {
@@ -480,15 +488,17 @@ async fn main() -> Result<()> {
         )?;
         info!("CLOB conectado · {}", market.slug);
         let mut heartbeat = tokio::time::interval(Duration::from_secs(10));
-        let mut rollover = tokio::time::interval(Duration::from_secs(10));
+        // Comprueba el límite de ronda con margen de un segundo: el cambio de ronda es un
+        // evento esperado cada 5 minutos, no una falla, así que no debe demorar como una.
+        let mut rollover = tokio::time::interval(Duration::from_secs(1));
 
         let why = loop {
             tokio::select! {
                 _ = heartbeat.tick() => {
-                    if let Err(error) = writer.send(Message::Text("PING".into())).await { break error.to_string(); }
+                    if let Err(error) = writer.send(Message::Text("PING".into())).await { break StreamExit::Error(error.to_string()); }
                 }
                 _ = rollover.tick() => {
-                    if current_slug() != market.slug { break "nueva ronda BTC 5m".to_string(); }
+                    if current_slug() != market.slug { break StreamExit::Rollover; }
                 }
                 message = reader.next() => match message {
                     Some(Ok(Message::Text(message))) => {
@@ -504,9 +514,9 @@ async fn main() -> Result<()> {
                             }
                         }
                     }
-                    Some(Ok(Message::Ping(bytes))) => { if let Err(error) = writer.send(Message::Pong(bytes)).await { break error.to_string(); } }
-                    Some(Ok(Message::Close(_))) | None => break "CLOB cerró la conexión".to_string(),
-                    Some(Err(error)) => break error.to_string(),
+                    Some(Ok(Message::Ping(bytes))) => { if let Err(error) = writer.send(Message::Pong(bytes)).await { break StreamExit::Error(error.to_string()); } }
+                    Some(Ok(Message::Close(_))) | None => break StreamExit::Error("CLOB cerró la conexión".to_string()),
+                    Some(Err(error)) => break StreamExit::Error(error.to_string()),
                     _ => {}
                 },
                 _ = tokio::signal::ctrl_c() => {
@@ -517,17 +527,27 @@ async fn main() -> Result<()> {
                 }
             }
         };
-        last_error = Some(why);
-        reconnects += 1;
-        wait_retry(
-            &output,
-            Some(market),
-            &books,
-            reconnects,
-            last_error.clone().unwrap_or_default(),
-            "clob-stream",
-        )
-        .await?;
+        match why {
+            // Una ronda nueva no es un error: no acumula `reconnects` (esa cuenta es
+            // información de salud real) ni espera el backoff exponencial pensado para
+            // fallas de red. Se redescubre de inmediato en la siguiente vuelta del bucle.
+            StreamExit::Rollover => {
+                info!("nueva ronda BTC 5m detectada; redescubriendo sin backoff");
+            }
+            StreamExit::Error(error) => {
+                last_error = Some(error);
+                reconnects += 1;
+                wait_retry(
+                    &output,
+                    Some(market),
+                    &books,
+                    reconnects,
+                    last_error.clone().unwrap_or_default(),
+                    "clob-stream",
+                )
+                .await?;
+            }
+        }
     }
 }
 
