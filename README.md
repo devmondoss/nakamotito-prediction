@@ -5,18 +5,27 @@ de predicción; no muestra el gráfico/DOM de Trading, no reutiliza su WAL ni pu
 
 ## Estado actual
 
-Dos watchers read-only y efímeros:
+Seis watchers read-only y efímeros, todos sobre BTC:
 
-- `prediction_watch`: BTC/USD Chainlink TWAP 60s vía Polymarket RTDS.
+- `prediction_watch`: BTC/USD Chainlink TWAP 60s vía Polymarket RTDS (referencia de settlement).
 - `prediction_clob_watch`: ronda BTC Up/Down 5m vigente vía Gamma + Market Channel del CLOB.
+- `prediction_binance_spot_watch` / `prediction_binance_perp_watch`: BTC/USDT spot y perp de Binance.
+- `prediction_bybit_spot_watch` / `prediction_bybit_perp_watch`: BTC/USDT spot y perp de Bybit.
 
-Ambos publican snapshots reemplazables en `prediction-state/`, con vencimiento explícito. No hay
+Los cuatro últimos son el multi-venue mínimo de la fase 3 del plan (formación de precio,
+independiente del oracle) — ver [MULTI-VENUE-CONTRACT-V1.md](docs/MULTI-VENUE-CONTRACT-V1.md).
+
+Todos publican snapshots reemplazables en `prediction-state/`, con vencimiento explícito. No hay
 historial, base de datos, wallet, API key ni ejecución.
 
 ```bash
 cargo test
 cargo run --release --bin prediction_watch
 cargo run --release --bin prediction_clob_watch
+cargo run --release --bin prediction_binance_spot_watch
+cargo run --release --bin prediction_binance_perp_watch
+cargo run --release --bin prediction_bybit_spot_watch
+cargo run --release --bin prediction_bybit_perp_watch
 ```
 
 ## Consola local
@@ -45,7 +54,8 @@ cargo run --release --bin prediction_watch -- --record prediction-data
 cargo run --release --bin prediction_clob_watch -- --record prediction-data
 ```
 
-Cada sesión crea `prediction-data/raw/<timestamp>-<source>/manifest.json` y `events.jsonl`.
+Los watchers de Binance/Bybit aceptan el mismo `--record`. Cada sesión crea
+`prediction-data/raw/<timestamp>-<source>/manifest.json` y `events.jsonl`.
 El almacén es append-only y read-only respecto a los venues: no contiene credenciales ni habilita
 órdenes. Para verificar una captura sin red y escribir su versión normalizada:
 

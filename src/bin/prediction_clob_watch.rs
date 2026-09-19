@@ -7,6 +7,7 @@
 use anyhow::{anyhow, Context, Result};
 use futures_util::{SinkExt, StreamExt};
 use nakamotito_prediction::research::{now_ms, ResearchWriter};
+use nakamotito_prediction::watch_support::retry_delay;
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -306,12 +307,6 @@ enum StreamExit {
     Error(String),
 }
 
-/// Exponential backoff limits retry pressure while a remote endpoint or the route to it is down.
-/// It is intentionally bounded: recovery remains prompt when the service returns.
-fn retry_delay(reconnects: u64) -> Duration {
-    Duration::from_secs(2_u64.saturating_pow(reconnects.min(4) as u32).min(30))
-}
-
 async fn wait_retry(
     output: &Path,
     market: Option<Market>,
@@ -595,12 +590,5 @@ mod tests {
         assert_eq!(books[0].best_bid.as_deref(), Some("0.51"));
         assert_eq!(books[0].best_ask.as_deref(), Some("0.55"));
         assert_eq!(books[0].spread.as_deref(), Some("0.040000"));
-    }
-
-    #[test]
-    fn backoff_es_acotado() {
-        assert_eq!(retry_delay(1), Duration::from_secs(2));
-        assert_eq!(retry_delay(2), Duration::from_secs(4));
-        assert_eq!(retry_delay(9), Duration::from_secs(16));
     }
 }

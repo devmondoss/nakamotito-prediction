@@ -1,14 +1,16 @@
-# Relevo — Contrato de calidad, CLOB L2 y registry por contrato
+# Relevo — Contrato de calidad, CLOB L2, registry y multi-venue mínimo
 
 **Fecha:** 2026-09-19
-**Estado:** fase 0 (contrato de calidad + registry por contrato) y fase 2 (CLOB L2) del
-[plan cuantitativo](QUANT-SETTLEMENT-PLAN-2026-09-18.md) implementadas y validadas contra captura
-real; sigue sin autorizarse entrenamiento, paper trading o ejecución. Siguiente pendiente: fase 3
-(collectors Binance/Bybit spot/perp).
+**Estado:** fase 0 (contrato de calidad + registry), fase 2 (CLOB L2) y el arranque de fase 3
+(collectors Binance/Bybit spot/perp) del [plan cuantitativo](QUANT-SETTLEMENT-PLAN-2026-09-18.md)
+implementados y validados contra datos reales; sigue sin autorizarse entrenamiento, paper trading
+o ejecución. Siguiente pendiente: normalización y calidad cruzada de los cuatro venues nuevos, y
+el lead-lag descriptivo que exige la puerta de fase 3.
 **Siguiente sesión:** leer este relevo, el [relevo anterior](HANDOFF-QUANT-2026-09-18.md), el
 [contrato normalized-event-v1](NORMALIZED-EVENT-CONTRACT-V1.md), el
-[contrato CLOB L2](CLOB-L2-CONTRACT-V1.md) y el
-[contrato de registry](CONTRACT-REGISTRY-V1.md) antes de tocar el reconstructor o sumar fuentes.
+[contrato CLOB L2](CLOB-L2-CONTRACT-V1.md), el
+[contrato de registry](CONTRACT-REGISTRY-V1.md) y el
+[contrato multi-venue](MULTI-VENUE-CONTRACT-V1.md) antes de tocar el reconstructor o sumar fuentes.
 
 ## Qué se hizo esta sesión
 
@@ -124,3 +126,27 @@ contractual; no hay señal direccional ni afirmación de edge.
   `prediction_watch`), 6 binarios compilan.
 - Se preguntó por hacer push a un remoto; el usuario decidió mantenerlo local por ahora. Sigue sin
   remoto configurado — decisión pendiente de una sesión futura.
+
+## Adenda 3 — multi-venue mínimo: Binance y Bybit spot/perp (misma fecha)
+
+- **Arrancada la fase 3**: cuatro collectors nuevos, read-only y efímeros —
+  `prediction_binance_spot_watch`, `prediction_binance_perp_watch`,
+  `prediction_bybit_spot_watch`, `prediction_bybit_perp_watch` — con el mismo contrato de
+  captura RAW (`ResearchWriter`) que ya usan los watchers de Polymarket. Nuevo módulo
+  `src/watch_support.rs` centraliza el backoff exponencial y la escritura atómica de snapshots
+  que antes solo existían duplicados en `prediction_clob_watch`. Contrato completo en
+  [MULTI-VENUE-CONTRACT-V1.md](MULTI-VENUE-CONTRACT-V1.md).
+- **Validado en vivo contra los cuatro endpoints reales** (no solo fixtures): Binance spot,
+  Bybit spot y Bybit perp capturaron datos reales completos (quote, trade con lado, y para Bybit
+  perp también mark price/funding/OI vía el canal acumulativo `tickers`). **Binance perp
+  conectó y recibió `bookTicker`, pero `aggTrade` y `markPrice@1s` no entregaron ningún mensaje
+  en 15 s de prueba** — confirmado también con un cliente independiente (Node), no solo con
+  nuestro binario. Todo indica una restricción geográfica/de cumplimiento de Binance sobre datos
+  de derivados según el origen de red del entorno donde se corrió esta sesión, no un bug del
+  código (el parseo está probado con fixtures del esquema documentado de Binance). **Pendiente
+  de re-validar desde otra red** antes de asumir que el funding de Binance perp funciona en
+  producción.
+- No se tocó normalización cruzada ni cálculo de lead-lag todavía — eso es lo que exige la
+  puerta de la fase 3 y sigue abierto para la siguiente sesión.
+- **cargo test**: ahora 42 pruebas en total (20 de `src/lib.rs`, más 5+4+3+4 de los cuatro
+  collectors nuevos, más las ya existentes), 9 binarios compilan.
