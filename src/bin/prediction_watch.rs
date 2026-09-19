@@ -1,13 +1,13 @@
-//! Prediction Watch — referencia de resolución en tiempo real, sin persistencia histórica.
+//! Prediction Watch — referencia de resolución en tiempo real.
 //!
 //! Este proceso no es el motor Binance ni un ejecutor. Escucha el RTDS público de Polymarket
 //! para el BTC/USD TWAP de Chainlink y publica una foto efímera para la futura consola de
-//! Nakamotito. Al terminar limpia su snapshot; no escribe WAL, Parquet, DuckDB ni órdenes.
-//!
-//! Uso: `cargo run --release --bin prediction_watch -- --out prediction-state`
+//! Nakamotito. Opcionalmente conserva el payload RAW de investigación en JSONL; no escribe
+//! órdenes ni comparte runtime con Trading.
 
 use anyhow::{Context, Result};
 use futures_util::{SinkExt, StreamExt};
+use nakamotito_prediction::research::{now_ms, ResearchWriter};
 use serde::Serialize;
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -19,6 +19,9 @@ const RTDS_URL: &str = "wss://ws-live-data.polymarket.com";
 const TOPIC: &str = "crypto_prices_twap_sixty";
 const SYMBOL: &str = "btc/usd";
 const SNAPSHOT: &str = "prediction-watch.json";
+const ROUND_MS: i64 = 300_000;
+/// Si el watcher arranca tarde, no inventa una referencia de apertura con un TWAP de mitad de ronda.
+const START_CAPTURE_GRACE_MS: i64 = 5_000;
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
 struct Twap {
@@ -43,6 +46,16 @@ struct Health {
     last_error: Option<String>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct RoundBaseline {
+    round_start_ms: i64,
+    round_end_ms: i64,
+    /// Solo se llena con el primer TWAP observado en los primeros segundos de la ronda.
+    /// Es una baseline de investigación; el contrato final sigue siendo la regla del mercado.
+    initial_twap: Option<Twap>,
+    status: &'static str,
+}
+
 #[derive(Debug, Serialize)]
 struct Snapshot {
     schema: &'static str,
@@ -54,14 +67,63 @@ struct Snapshot {
     persistence: &'static str,
     source: &'static str,
     chainlink_twap: Option<Twap>,
+    round_baseline: RoundBaseline,
     health: Health,
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i64)
-        .unwrap_or(0)
+fn round_start_ms(at_ms: i64) -> i64 {
+    at_ms / ROUND_MS * ROUND_MS
+}
+
+fn new_round(at_ms: i64) -> RoundBaseline {
+    let start = round_start_ms(at_ms);
+    RoundBaseline {
+        round_start_ms: start,
+        round_end_ms: start + ROUND_MS,
+        initial_twap: None,
+        status: "AWAITING_START_TWAP",
+    }
+}
+
+fn update_round(round: &mut RoundBaseline, twap: &Twap) {
+    let candidate_start = round_start_ms(twap.observed_at_ms);
+    if candidate_start != round.round_start_ms {
+        *round = new_round(twap.observed_at_ms);
+    }
+    if round.initial_twap.is_some() || round.status == "MISSED_START_TWAP" {
+        return;
+    }
+    if twap.observed_at_ms <= round.round_start_ms + START_CAPTURE_GRACE_MS {
+        round.initial_twap = Some(twap.clone());
+        round.status = "CAPTURED";
+    } else {
+        round.status = "MISSED_START_TWAP";
+    }
+}
+
+fn snapshot(
+    twap: Option<Twap>,
+    round_baseline: RoundBaseline,
+    reconnects: u64,
+    last_error: Option<String>,
+    connected: bool,
+) -> Snapshot {
+    Snapshot {
+        schema: "prediction-watch-v1",
+        generated_at_ms: now_ms(),
+        expires_at_ms: now_ms() + 10_000,
+        mode: "streaming-first",
+        execution: false,
+        persistence: "research-raw-optional",
+        source: "polymarket-rtds/chainlink",
+        chainlink_twap: twap,
+        round_baseline,
+        health: Health {
+            connected,
+            reconnects,
+            last_error,
+        },
+    }
 }
 
 fn value_text(value: &Value) -> Option<String> {
@@ -121,17 +183,30 @@ fn write_snapshot(path: &Path, snapshot: &Snapshot) -> Result<()> {
     Ok(())
 }
 
-fn output_arg() -> PathBuf {
+struct Args {
+    output: PathBuf,
+    record_dir: Option<PathBuf>,
+}
+
+fn args() -> Args {
     let mut args = std::env::args().skip(1);
     let mut out = PathBuf::from("prediction-state");
+    let mut record_dir = None;
     while let Some(arg) = args.next() {
         if arg == "--out" {
             if let Some(value) = args.next() {
                 out = PathBuf::from(value);
             }
+        } else if arg == "--record" {
+            if let Some(value) = args.next() {
+                record_dir = Some(PathBuf::from(value));
+            }
         }
     }
-    out.join(SNAPSHOT)
+    Args {
+        output: out.join(SNAPSHOT),
+        record_dir,
+    }
 }
 
 #[tokio::main]
@@ -144,29 +219,33 @@ async fn main() -> Result<()> {
         .with_target(false)
         .init();
 
-    let output = output_arg();
+    let args = args();
+    let output = args.output;
+    let mut research = args
+        .record_dir
+        .as_deref()
+        .map(|directory| ResearchWriter::open(directory, "polymarket-rtds-chainlink", now_ms()))
+        .transpose()?;
+    if let Some(writer) = &research {
+        info!(session = %writer.session_dir().display(), "captura RAW Chainlink habilitada");
+    }
     let mut twap = None;
+    let mut round_baseline = new_round(now_ms());
     let mut reconnects = 0_u64;
     let mut last_error = None;
     info!("Prediction Watch · {SYMBOL} · Chainlink TWAP 60s · efímero/read-only");
 
     loop {
-        let snapshot = Snapshot {
-            schema: "prediction-watch-v1",
-            generated_at_ms: now_ms(),
-            expires_at_ms: now_ms() + 10_000,
-            mode: "streaming-first",
-            execution: false,
-            persistence: "none",
-            source: "polymarket-rtds/chainlink",
-            chainlink_twap: twap.clone(),
-            health: Health {
-                connected: false,
+        write_snapshot(
+            &output,
+            &snapshot(
+                twap.clone(),
+                round_baseline.clone(),
                 reconnects,
-                last_error: last_error.clone(),
-            },
-        };
-        write_snapshot(&output, &snapshot)?;
+                last_error.clone(),
+                false,
+            ),
+        )?;
 
         let connected = connect_async(RTDS_URL).await;
         let (socket, _) = match connected {
@@ -181,17 +260,10 @@ async fn main() -> Result<()> {
         };
         let (mut writer, mut reader) = socket.split();
         writer.send(Message::Text(subscription().into())).await?;
-        write_snapshot(&output, &Snapshot {
-            schema: "prediction-watch-v1",
-            generated_at_ms: now_ms(),
-            expires_at_ms: now_ms() + 10_000,
-            mode: "streaming-first",
-            execution: false,
-            persistence: "none",
-            source: "polymarket-rtds/chainlink",
-            chainlink_twap: twap.clone(),
-            health: Health { connected: true, reconnects, last_error: None },
-        })?;
+        write_snapshot(
+            &output,
+            &snapshot(twap.clone(), round_baseline.clone(), reconnects, None, true),
+        )?;
         info!("RTDS conectado");
         let mut heartbeat = tokio::time::interval(Duration::from_secs(5));
 
@@ -201,23 +273,26 @@ async fn main() -> Result<()> {
                     if let Err(error) = writer.send(Message::Text("PING".into())).await {
                         break Some(error.to_string());
                     }
+                    // Mantiene el estado vivo y permite que la UI detecte una ronda sin baseline.
+                    if round_start_ms(now_ms()) != round_baseline.round_start_ms && round_baseline.initial_twap.is_none() {
+                        round_baseline = new_round(now_ms());
+                    }
+                    if let Err(error) = write_snapshot(&output, &snapshot(twap.clone(), round_baseline.clone(), reconnects, None, true)) {
+                        warn!("no se pudo refrescar snapshot: {error}");
+                    }
                 }
                 message = reader.next() => match message {
                     Some(Ok(Message::Text(text))) => {
-                        if let Some(next) = parse_twap(&text, now_ms()) {
+                        let received_at_ms = now_ms();
+                        if let Some(writer) = research.as_mut() {
+                            if let Err(error) = writer.record_text("rtds-message", received_at_ms, &text) {
+                                warn!("no se pudo registrar evento RAW: {error}");
+                            }
+                        }
+                        if let Some(next) = parse_twap(&text, received_at_ms) {
+                            update_round(&mut round_baseline, &next);
                             twap = Some(next);
-                            let snapshot = Snapshot {
-                                schema: "prediction-watch-v1",
-                                generated_at_ms: now_ms(),
-                                expires_at_ms: now_ms() + 10_000,
-                                mode: "streaming-first",
-                                execution: false,
-                                persistence: "none",
-                                source: "polymarket-rtds/chainlink",
-                                chainlink_twap: twap.clone(),
-                                health: Health { connected: true, reconnects, last_error: None },
-                            };
-                            if let Err(error) = write_snapshot(&output, &snapshot) {
+                            if let Err(error) = write_snapshot(&output, &snapshot(twap.clone(), round_baseline.clone(), reconnects, None, true)) {
                                 warn!("no se pudo publicar snapshot efímero: {error}");
                             }
                         }
@@ -227,6 +302,7 @@ async fn main() -> Result<()> {
                     _ => {}
                 },
                 _ = tokio::signal::ctrl_c() => {
+                    if let Some(writer) = research.as_mut() { let _ = writer.flush(); }
                     let _ = std::fs::remove_file(&output);
                     info!("Prediction Watch detenido; snapshot efímero eliminado");
                     return Ok(());
@@ -247,12 +323,18 @@ mod tests {
     #[test]
     fn acepta_el_payload_twap_60_btc_usd() {
         let payload = r#"{"topic":"crypto_prices_twap_sixty","timestamp":1002,"payload":{"symbol":"btc/usd","value":65000.5,"full_accuracy_value":"65000500000000000000000","timestamp":1000,"window_s":60}}"#;
-        assert_eq!(parse_twap(payload, 1003), Some(Twap {
-            symbol: "btc/usd".to_string(), window_seconds: 60,
-            value: "65000.5".to_string(),
-            full_accuracy_value: Some("65000500000000000000000".to_string()),
-            observed_at_ms: 1000, published_at_ms: 1002, received_at_ms: 1003,
-        }));
+        assert_eq!(
+            parse_twap(payload, 1003),
+            Some(Twap {
+                symbol: "btc/usd".to_string(),
+                window_seconds: 60,
+                value: "65000.5".to_string(),
+                full_accuracy_value: Some("65000500000000000000000".to_string()),
+                observed_at_ms: 1000,
+                published_at_ms: 1002,
+                received_at_ms: 1003,
+            })
+        );
     }
 
     #[test]
@@ -261,5 +343,39 @@ mod tests {
         let bad_symbol = r#"{"topic":"crypto_prices_twap_sixty","timestamp":2,"payload":{"symbol":"eth/usd","value":"1","timestamp":1,"window_s":60}}"#;
         assert!(parse_twap(bad_window, 3).is_none());
         assert!(parse_twap(bad_symbol, 3).is_none());
+    }
+
+    #[test]
+    fn baseline_no_se_inventa_si_el_watcher_llega_tarde() {
+        let mut round = new_round(300_000);
+        let late = Twap {
+            symbol: SYMBOL.into(),
+            window_seconds: 60,
+            value: "1".into(),
+            full_accuracy_value: None,
+            observed_at_ms: 310_001,
+            published_at_ms: 310_002,
+            received_at_ms: 310_003,
+        };
+        update_round(&mut round, &late);
+        assert!(round.initial_twap.is_none());
+        assert_eq!(round.status, "MISSED_START_TWAP");
+    }
+
+    #[test]
+    fn baseline_usa_el_primer_twap_de_inicio_de_ronda() {
+        let mut round = new_round(300_000);
+        let opening = Twap {
+            symbol: SYMBOL.into(),
+            window_seconds: 60,
+            value: "1".into(),
+            full_accuracy_value: None,
+            observed_at_ms: 300_900,
+            published_at_ms: 301_000,
+            received_at_ms: 301_100,
+        };
+        update_round(&mut round, &opening);
+        assert_eq!(round.initial_twap, Some(opening));
+        assert_eq!(round.status, "CAPTURED");
     }
 }

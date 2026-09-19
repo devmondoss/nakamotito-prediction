@@ -1,4 +1,5 @@
 /target/
 /prediction-state/
+/prediction-data/
 /logs/
 .DS_Store
