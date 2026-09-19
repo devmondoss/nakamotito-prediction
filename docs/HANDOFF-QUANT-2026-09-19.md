@@ -71,3 +71,25 @@ real; sigue sin autorizarse entrenamiento, paper trading o ejecución.
 Todos los de [HANDOFF-QUANT-2026-09-18.md](HANDOFF-QUANT-2026-09-18.md#límites-importantes) siguen
 vigentes: sin wallet, credenciales, orden ni ejecución; Chainlink TWAP sigue siendo el único target
 contractual; no hay señal direccional ni afirmación de edge.
+
+## Adenda — fix de consola y literatura externa (misma fecha)
+
+- **Fix:** la consola en modo release no podía arrancar los watchers (`START WATCHERS` fallaba con
+  "no se pudo iniciar Oracle Watch"). `child()` en `src/bin/prediction_console.rs` buscaba el
+  binario hermano en `target/release/`, pero su build de respaldo corría `cargo build` sin
+  `--release`, que compila a `target/debug/`. Ahora detecta el perfil desde la ruta del propio
+  ejecutable y pasa `--release` cuando corresponde.
+- **Literatura externa revisada** (sin autorizar ninguna fase nueva): dos papers peer-reviewed sobre
+  order flow/order imbalance y retornos cripto, convertidos a Markdown para referencia del repo:
+  - [PAPER-DOAN-VO-2025-NET-BUYING-PRESSURE.md](PAPER-DOAN-VO-2025-NET-BUYING-PRESSURE.md) — order
+    imbalance de opciones ponderado por delta de Black-Scholes, demanda direccional vs. de
+    volatilidad, BTC/ETH.
+  - [PAPER-ANASTASOPOULOS-2026-ORDER-FLOW-CRYPTO.md](PAPER-ANASTASOPOULOS-2026-ORDER-FLOW-CRYPTO.md) —
+    world order flow (11 divisas) y su poder predictivo out-of-sample vía ML no-lineal, 84 coins.
+  - [RESEARCH-NOTES-2026-09-19-ORDER-FLOW-AND-GREEKS.md](RESEARCH-NOTES-2026-09-19-ORDER-FLOW-AND-GREEKS.md) —
+    síntesis: qué de esto es evidencia real (delta/order flow de opciones) vs. qué sigue sin
+    evidencia académica sólida (exposición gamma/GEX de dealers), y qué haría falta capturar antes
+    de poder testear cualquiera de los dos contra nuestro contrato de 5 minutos. Identifica una
+    referencia ya citada en el plan (`sciencedirect.com/.../S1544612326008688`, sobre expiración de
+    BTC y gamma) que sigue sin leerse — candidato natural para la próxima sesión antes de diseñar la
+    fase 6 (opciones).
