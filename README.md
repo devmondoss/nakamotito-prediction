@@ -59,7 +59,21 @@ cargo run --release --bin prediction_replay -- \
 `--l2-out` es opcional y reconstruye determinísticamente el libro L2 de una sesión CLOB (`book` +
 `price_change`), sin red. El contrato de normalización está en
 [normalized-event-v1](docs/NORMALIZED-EVENT-CONTRACT-V1.md) y el de la reconstrucción de libro en
-[CLOB L2](docs/CLOB-L2-CONTRACT-V1.md); los próximos pasos siguen en el
+[CLOB L2](docs/CLOB-L2-CONTRACT-V1.md).
+
+Para reconstruir la regla de resolución, ventana y un label de investigación por ronda (BTC
+Up/Down), cruzando una sesión Gamma con su sesión RTDS correspondiente:
+
+```bash
+cargo run --release --bin prediction_registry -- \
+  --gamma-input prediction-data/raw/<sesión>-polymarket-gamma-clob/events.jsonl \
+  --rtds-input prediction-data/raw/<sesión>-polymarket-rtds-chainlink/events.jsonl \
+  --out prediction-data/registry/<sesión>.jsonl
+```
+
+El label es una reconstrucción propia sobre lo capturado, no la resolución oficial de
+Polymarket; sin evidencia suficiente queda `UNRESOLVED`, nunca inferido. Contrato completo en
+[CONTRACT-REGISTRY-V1.md](docs/CONTRACT-REGISTRY-V1.md). Los próximos pasos siguen en el
 [plan cuantitativo](docs/QUANT-SETTLEMENT-PLAN-2026-09-18.md).
 
 Antes de añadir cualquier forecast se validará la salud del feed, transición de rondas, timestamps

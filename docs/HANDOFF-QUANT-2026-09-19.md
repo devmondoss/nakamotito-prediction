@@ -1,12 +1,14 @@
-# Relevo — Contrato de calidad y CLOB L2
+# Relevo — Contrato de calidad, CLOB L2 y registry por contrato
 
 **Fecha:** 2026-09-19
-**Estado:** fase 0 (contrato de calidad) y fase 2 (CLOB L2) del
+**Estado:** fase 0 (contrato de calidad + registry por contrato) y fase 2 (CLOB L2) del
 [plan cuantitativo](QUANT-SETTLEMENT-PLAN-2026-09-18.md) implementadas y validadas contra captura
-real; sigue sin autorizarse entrenamiento, paper trading o ejecución.
+real; sigue sin autorizarse entrenamiento, paper trading o ejecución. Siguiente pendiente: fase 3
+(collectors Binance/Bybit spot/perp).
 **Siguiente sesión:** leer este relevo, el [relevo anterior](HANDOFF-QUANT-2026-09-18.md), el
-[contrato normalized-event-v1](NORMALIZED-EVENT-CONTRACT-V1.md) y el
-[contrato CLOB L2](CLOB-L2-CONTRACT-V1.md) antes de tocar el reconstructor o sumar fuentes.
+[contrato normalized-event-v1](NORMALIZED-EVENT-CONTRACT-V1.md), el
+[contrato CLOB L2](CLOB-L2-CONTRACT-V1.md) y el
+[contrato de registry](CONTRACT-REGISTRY-V1.md) antes de tocar el reconstructor o sumar fuentes.
 
 ## Qué se hizo esta sesión
 
@@ -93,3 +95,32 @@ contractual; no hay señal direccional ni afirmación de edge.
     referencia ya citada en el plan (`sciencedirect.com/.../S1544612326008688`, sobre expiración de
     BTC y gamma) que sigue sin leerse — candidato natural para la próxima sesión antes de diseñar la
     fase 6 (opciones).
+  - Los dos papers convertidos cubrían BTC y ETH; se recortó el contenido de ETH en ambas notas
+    porque este proyecto solo cubre BTC.
+
+## Adenda 2 — registry por contrato (misma fecha)
+
+- **Implementado** el punto 3 del orden de construcción: `src/registry.rs` (nuevo módulo) +
+  binario `prediction_registry`. Cruza una sesión RAW `polymarket-gamma-clob` (regla/ventana por
+  ronda) con su sesión `polymarket-rtds-chainlink` correspondiente y produce una entrada JSONL por
+  ronda con la regla de resolución y un label auto-calculado `UP`/`DOWN`/`UNRESOLVED`. El label
+  aplica la regla que Polymarket documenta (`cierre >= apertura → Up`) sobre nuestras propias
+  lecturas capturadas — **no es la resolución autoritativa de Polymarket/on-chain** — y queda
+  `UNRESOLVED` con razón explícita (`missing_baseline`/`missing_closing`) en vez de inferir un
+  valor faltante. Contrato completo en
+  [CONTRACT-REGISTRY-V1.md](CONTRACT-REGISTRY-V1.md).
+- Validado contra las tres sesiones pareadas del 2026-09-18: las rondas con evidencia completa
+  encadenan correctamente (el cierre de una ronda es el baseline exacto de la siguiente) y las
+  marcadas `UNRESOLVED` corresponden a huecos reales de captura, no a un bug.
+- **Se arregló también** un bug real de la consola detectado en vivo por el usuario: cada cambio
+  de ronda de 5 minutos se trataba como una falla de conexión (acumulaba el contador de
+  `reconnects`, que nunca se reseteaba, y esperaba el mismo backoff exponencial que una
+  desconexión real, hasta 16 s) antes de redescubrir la ronda nueva vía Gamma. Sumado al chequeo
+  de rollover cada 10 s, el panel mostraba "CLOSED" hasta ~25 s de más por ronda, empeorando cuanto
+  más tiempo llevaba corriendo la consola. `prediction_clob_watch.rs` ahora distingue
+  `StreamExit::Rollover` (sin backoff, redetectado en ~1 s) de `StreamExit::Error` (backoff sin
+  cambios).
+- **cargo test**: 26 pruebas (19 de `src/lib.rs`, 3 de `prediction_clob_watch`, 4 de
+  `prediction_watch`), 6 binarios compilan.
+- Se preguntó por hacer push a un remoto; el usuario decidió mantenerlo local por ahora. Sigue sin
+  remoto configurado — decisión pendiente de una sesión futura.

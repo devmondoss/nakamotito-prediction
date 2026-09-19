@@ -205,7 +205,7 @@ pub fn normalize(raw: &RawEventOwned) -> NormalizedEvent<'_> {
 /// línea truncada; en vez de abortar toda la relectura por eso, se avisa por stderr y se ignora
 /// solo esa línea final. Cualquier otra línea inválida —o un schema no soportado— sigue siendo un
 /// error duro: no se puede distinguir de corrupción real.
-fn for_each_raw_event(
+pub(crate) fn for_each_raw_event(
     input: &Path,
     mut handle: impl FnMut(RawEventOwned) -> Result<()>,
 ) -> Result<()> {
