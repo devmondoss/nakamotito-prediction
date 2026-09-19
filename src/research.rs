@@ -162,8 +162,51 @@ pub(crate) fn timestamp(value: Option<&Value>) -> Option<i64> {
 /// declarado; los demás (p. ej. `gamma-market-response`, `new_market`, `tick_size_change`) se
 /// conservan igual pero sin inventar un reloj que el proveedor no puso en ese lugar.
 fn known_event_clock_kind(kind: &str) -> bool {
-    matches!(kind, "rtds-message" | "clob-message")
+    matches!(
+        kind,
+        "rtds-message"
+            | "clob-message"
+            | "binance-spot-message"
+            | "binance-perp-message"
+            | "bybit-spot-message"
+            | "bybit-perp-message"
+    )
 }
+
+/// Los streams combinados de Binance envuelven cada mensaje como `{"stream": "...",
+/// "data": {...}}`. Solo `aggTrade` y `markPrice` declaran un reloj de evento;
+/// `bookTicker` no trae ninguno (confirmado contra captura real el 2026-09-19), así que
+/// se deja `None` en vez de usar el reloj de recepción como si fuera el del proveedor.
+fn binance_event_at_ms(raw: &Value) -> Option<i64> {
+    let stream = raw.get("stream")?.as_str()?;
+    let data = raw.get("data")?;
+    if stream.ends_with("@aggTrade") {
+        data.get("T").and_then(Value::as_i64)
+    } else if stream.contains("@markPrice") {
+        // `T` en markPriceUpdate es el próximo funding, no el reloj del evento; el reloj
+        // de evento es `E`.
+        data.get("E").and_then(Value::as_i64)
+    } else {
+        None
+    }
+}
+
+/// Los mensajes de Bybit v5 traen `ts` a nivel superior en todos los topics de mercado
+/// (`orderbook.1`, `publicTrade`, `tickers`); los mensajes de control (ack de
+/// suscripción, pong) no lo traen y quedan `None`.
+fn bybit_event_at_ms(raw: &Value) -> Option<i64> {
+    raw.get("ts").and_then(Value::as_i64)
+}
+
+/// Un evento cuyo reloj declarado cae hasta esto por delante de nuestro reloj de
+/// recepción sigue contando `GOOD`: validado contra una sesión real de 200 s del
+/// 2026-09-19, el desfase de reloj entre nuestra máquina y Polymarket cayó siempre
+/// entre 0 y 64 ms (65 991 eventos, máximo observado 64 ms). Antes de esta tolerancia,
+/// cualquier latencia negativa —incluida -1 ms— se marcaba `INVALID`, lo que clasificó
+/// el 81 % de esa sesión como inválida por puro desfase de reloj normal, no por un dato
+/// roto. El margen (250 ms) deja holgura sobre lo observado sin dejar de detectar un
+/// reloj genuinamente imposible (segundos de diferencia).
+const CLOCK_SKEW_TOLERANCE_MS: i64 = 250;
 
 pub fn normalize(raw: &RawEventOwned) -> NormalizedEvent<'_> {
     let event_at_ms = match raw.kind.as_str() {
@@ -172,6 +215,8 @@ pub fn normalize(raw: &RawEventOwned) -> NormalizedEvent<'_> {
             .get("payload")
             .and_then(|payload| timestamp(payload.get("timestamp"))),
         "clob-message" => timestamp(raw.raw.get("timestamp")),
+        "binance-spot-message" | "binance-perp-message" => binance_event_at_ms(&raw.raw),
+        "bybit-spot-message" | "bybit-perp-message" => bybit_event_at_ms(&raw.raw),
         _ => None,
     };
     let ingest_latency_ms = raw.processed_at_ms - raw.received_at_ms;
@@ -179,7 +224,9 @@ pub fn normalize(raw: &RawEventOwned) -> NormalizedEvent<'_> {
 
     let (quality, quality_reason) = match (event_at_ms, publish_latency_ms) {
         _ if !known_event_clock_kind(&raw.kind) => ("DEGRADED", Some("unrecognized_kind")),
-        (Some(_), Some(latency)) if latency < 0 => ("INVALID", Some("event_after_receive")),
+        (Some(_), Some(latency)) if latency < -CLOCK_SKEW_TOLERANCE_MS => {
+            ("INVALID", Some("event_after_receive"))
+        }
         (Some(_), _) => ("GOOD", None),
         (None, _) => ("DEGRADED", Some("no_event_clock_declared")),
     };
@@ -304,6 +351,98 @@ mod tests {
     use super::*;
 
     #[test]
+    fn binance_book_ticker_no_declara_reloj_de_evento() {
+        // Payload real capturado el 2026-09-19 contra Binance spot: bookTicker no trae
+        // ningún timestamp.
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "binance-spot".into(),
+            kind: "binance-spot-message".into(),
+            received_at_ms: 100,
+            processed_at_ms: 100,
+            raw: serde_json::json!({
+                "stream": "btcusdt@bookTicker",
+                "data": {"u": 1, "s": "BTCUSDT", "b": "1", "B": "1", "a": "2", "A": "1"},
+            }),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.event_at_ms, None);
+        assert_eq!(event.quality, "DEGRADED");
+        assert_eq!(event.quality_reason, Some("no_event_clock_declared"));
+    }
+
+    #[test]
+    fn binance_agg_trade_usa_el_reloj_de_trade() {
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "binance-spot".into(),
+            kind: "binance-spot-message".into(),
+            received_at_ms: 1000,
+            processed_at_ms: 1000,
+            raw: serde_json::json!({
+                "stream": "btcusdt@aggTrade",
+                "data": {"p": "1", "q": "1", "T": 950_i64, "m": false},
+            }),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.event_at_ms, Some(950));
+        assert_eq!(event.quality, "GOOD");
+    }
+
+    #[test]
+    fn binance_mark_price_usa_e_no_t_porque_t_es_el_proximo_funding() {
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "binance-perp".into(),
+            kind: "binance-perp-message".into(),
+            received_at_ms: 1000,
+            processed_at_ms: 1000,
+            raw: serde_json::json!({
+                "stream": "btcusdt@markPrice@1s",
+                "data": {"E": 900_i64, "p": "1", "i": "1", "r": "0.0001", "T": 9_999_999_i64},
+            }),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.event_at_ms, Some(900));
+    }
+
+    #[test]
+    fn bybit_usa_el_ts_de_nivel_superior_para_cualquier_topic() {
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "bybit-spot".into(),
+            kind: "bybit-spot-message".into(),
+            received_at_ms: 1000,
+            processed_at_ms: 1000,
+            raw: serde_json::json!({
+                "topic": "orderbook.1.BTCUSDT",
+                "ts": 850_i64,
+                "type": "snapshot",
+                "data": {"s": "BTCUSDT", "b": [["1", "1"]], "a": [["2", "1"]]},
+            }),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.event_at_ms, Some(850));
+        assert_eq!(event.quality, "GOOD");
+    }
+
+    #[test]
+    fn bybit_mensaje_de_control_sin_ts_queda_degradado() {
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "bybit-spot".into(),
+            kind: "bybit-spot-message".into(),
+            received_at_ms: 1000,
+            processed_at_ms: 1000,
+            raw: serde_json::json!({"success": true, "ret_msg": "subscribe", "op": "subscribe"}),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.event_at_ms, None);
+        assert_eq!(event.quality, "DEGRADED");
+        assert_eq!(event.quality_reason, Some("no_event_clock_declared"));
+    }
+
+    #[test]
     fn tolera_una_ultima_linea_truncada_por_una_sesion_interrumpida() {
         let dir =
             std::env::temp_dir().join(format!("prediction-replay-test-truncated-{}", now_ms()));
@@ -415,12 +554,32 @@ mod tests {
             kind: "clob-message".into(),
             received_at_ms: 100,
             processed_at_ms: 101,
-            raw: serde_json::json!({"timestamp": "150"}),
+            // 5 segundos de diferencia no es desfase de reloj plausible entre dos
+            // máquinas: es un reloj imposible.
+            raw: serde_json::json!({"timestamp": "5100"}),
         };
         let event = normalize(&raw);
-        assert_eq!(event.event_at_ms, Some(150));
-        assert_eq!(event.publish_latency_ms, Some(-50));
+        assert_eq!(event.event_at_ms, Some(5100));
+        assert_eq!(event.publish_latency_ms, Some(-5000));
         assert_eq!(event.quality, "INVALID");
         assert_eq!(event.quality_reason, Some("event_after_receive"));
+    }
+
+    #[test]
+    fn tolera_un_desfase_de_reloj_pequeno_entre_maquinas() {
+        // Validado contra una sesión real de 200s del 2026-09-19: el desfase observado
+        // entre nuestra máquina y Polymarket llegó hasta 64ms sin que fuera un dato roto.
+        let raw = RawEventOwned {
+            schema: "prediction-raw-event-v1".into(),
+            source: "polymarket-gamma-clob".into(),
+            kind: "clob-message".into(),
+            received_at_ms: 1000,
+            processed_at_ms: 1000,
+            raw: serde_json::json!({"timestamp": "1064"}),
+        };
+        let event = normalize(&raw);
+        assert_eq!(event.publish_latency_ms, Some(-64));
+        assert_eq!(event.quality, "GOOD");
+        assert_eq!(event.quality_reason, None);
     }
 }

@@ -2,8 +2,9 @@
 
 **Estado:** implementado en `src/research.rs::normalize` y `prediction_replay`; read-only,
 source-local, sin red. Cubre la fase 0 del [plan cuantitativo](QUANT-SETTLEMENT-PLAN-2026-09-18.md)
-("contrato de calidad") para las dos fuentes actuales; queda abierto a nuevas fuentes sin cambiar
-su forma.
+("contrato de calidad") y ya cubre las seis fuentes actuales (Polymarket RTDS/CLOB y el
+multi-venue mínimo de Binance/Bybit — ver [MULTI-VENUE-CONTRACT-V1.md](MULTI-VENUE-CONTRACT-V1.md));
+queda abierto a nuevas fuentes sin cambiar su forma.
 
 ## Objetivo
 
@@ -41,14 +42,23 @@ una secuencia, el campo correspondiente queda `null` y la razón de la degradaci
 | `quality` | `GOOD` \| `DEGRADED` \| `INVALID` (ver tabla). `ABSENT` no aplica a nivel de evento individual —describe la ausencia de una fuente completa, que se evalúa en la capa de features, no aquí. | — |
 | `quality_reason` | Código estable de la razón. | Solo cuando `quality == "GOOD"`. |
 
-## Reglas de calidad (deterministas, sin umbrales inventados)
+## Reglas de calidad (deterministas, con una única tolerancia justificada por dato real)
 
 | `quality` | Condición | `quality_reason` |
 |---|---|---|
-| `GOOD` | `event_at_ms` presente y `publish_latency_ms >= 0`. | — |
-| `DEGRADED` | El `kind` no tiene un reloj de evento conocido (p. ej. `gamma-market-response`, `new_market`, `tick_size_change` cuando el proveedor no puso `timestamp` en ese lugar). | `unrecognized_kind` |
-| `DEGRADED` | El `kind` sí tiene reloj de evento conocido (`rtds-message`, `clob-message`) pero este mensaje concreto no lo trajo. | `no_event_clock_declared` |
-| `INVALID` | `event_at_ms` posterior a `received_at_ms` (`publish_latency_ms < 0`): reloj imposible, típicamente desfase del proveedor o bug de parseo. | `event_after_receive` |
+| `GOOD` | `event_at_ms` presente y `publish_latency_ms >= -250 ms`. | — |
+| `DEGRADED` | El `kind` no tiene un reloj de evento conocido (p. ej. `gamma-market-response`, `new_market`, `tick_size_change`, `bookTicker` de Binance, un ack de suscripción de Bybit). | `unrecognized_kind` / `no_event_clock_declared` |
+| `INVALID` | `event_at_ms` más de 250 ms posterior a `received_at_ms`: reloj imposible, no explicable por desfase normal entre máquinas. | `event_after_receive` |
+
+**Por qué 250 ms y no 0:** la primera versión de esta regla marcaba `INVALID` cualquier
+`publish_latency_ms` negativo, incluido -1 ms. Validada contra una sesión real de 200 s
+capturada el 2026-09-19, esa regla clasificó **81 % de los eventos `clob-message` de esa sesión
+como `INVALID`** — pero los 65 991 casos tenían un desfase de entre -1 ms y -64 ms, exactamente
+el rango de desfase de reloj esperable entre dos máquinas distintas (ver
+`tolera_un_desfase_de_reloj_pequeno_entre_maquinas` en `src/research.rs`). Era un falso positivo
+masivo por una regla demasiado estricta, no un problema del dato. El margen de 250 ms deja holgura
+sobre el máximo observado (64 ms) sin dejar de detectar un reloj genuinamente imposible (segundos
+de diferencia).
 
 `DEGRADED` no descarta el payload: se conserva completo en `payload` para que una fase posterior
 decida si lo usa. Un evento `DEGRADED` o `INVALID` no debe alimentar features ni labels sin decisión
@@ -60,6 +70,8 @@ explícita de la fase 5 del plan.
 |---|---|---|
 | `polymarket-rtds-chainlink` | `rtds-message` | `payload.timestamp` (reloj de observación Chainlink, no el de publicación de RTDS). |
 | `polymarket-gamma-clob` | `clob-message` | `timestamp` de nivel superior del mensaje (Polymarket no distingue evento/publicación en el Market Channel; por eso no hay un `publish_at_ms` separado en este contrato). |
+| `binance-spot`, `binance-perp` | `binance-*-message` | Solo `aggTrade` (campo `T`, hora del trade) y `markPrice`/`markPrice@1s` (campo `E`, hora del evento — `T` ahí es el *próximo funding*, no el reloj del evento). `bookTicker` no declara ningún reloj. |
+| `bybit-spot`, `bybit-perp` | `bybit-*-message` | `ts` de nivel superior, presente en todos los topics de mercado (`orderbook.1`, `publicTrade`, `tickers`); los mensajes de control (ack de suscripción, pong) no lo traen. |
 
 Cualquier otro `kind` (`gamma-market-response`, y los `clob-message` cuyo `event_type` no trae
 `timestamp` propio, como `new_market` en algunas respuestas observadas) queda `DEGRADED` en vez de
@@ -67,18 +79,29 @@ inventar un reloj.
 
 ## Validado contra captura real
 
-Corriendo `prediction_replay` sobre una sesión real de ~94k eventos CLOB capturada el 2026-09-18:
-93 919 `GOOD`, 39 `DEGRADED` (32 `clob-message` sin `timestamp` propio, 7
-`gamma-market-response`), 0 `INVALID`. La distribución es consistente con lo observado en el RAW:
-no se inventó ninguna fuente de calidad que no viniera del dato.
+- **2026-09-18**, ~94k eventos CLOB de una sesión: 93 919 `GOOD`, 39 `DEGRADED` (32 `clob-message`
+  sin `timestamp` propio, 7 `gamma-market-response`), 0 `INVALID`.
+- **2026-09-19**, sesión de 200 s con los seis venues corriendo a la vez (la que reveló la
+  necesidad de la tolerancia de 250 ms): tras el fix, `polymarket-gamma-clob` quedó en 100 %
+  `GOOD`/`DEGRADED` (0 `INVALID`, sobre 81 164 eventos); `binance-spot` en 8.9 % `GOOD`
+  (`aggTrade`) / 91.1 % `DEGRADED` (`bookTicker`, sin reloj); `bybit-spot`/`bybit-perp` en
+  ~98-99.6 % `GOOD`. `binance-perp` quedó 100 % `DEGRADED` porque en este entorno de red solo
+  llegó `bookTicker` — ver la limitación documentada en
+  [MULTI-VENUE-CONTRACT-V1.md](MULTI-VENUE-CONTRACT-V1.md).
 
 ## Límites explícitos
 
-- `sequence` sigue `None` para ambas fuentes actuales: no hay número de mensaje ni epoch que
-  verificar. La reconstrucción de libro CLOB (ver
+- `sequence` sigue `None` para todas las fuentes actuales: ninguna declara un número de mensaje o
+  epoch verificable. La reconstrucción de libro CLOB (ver
   [contrato de captura](RESEARCH-CAPTURE-CONTRACT.md) y el reconstructor L2 en `src/l2.rs`) no
   depende de este campo; usa sus propios snapshots `book` como puntos de resincronización.
 - Este contrato es **source-local**: no fusiona eventos de distintas fuentes ni calcula lead-lag.
-  Eso pertenece a la fase 3 del plan (cohortes A/B), una vez que existan collectors multi-venue.
+  Eso sigue siendo la puerta de la fase 3 del plan (cohortes A/B), ahora que ya existen los
+  collectors multi-venue (ver [MULTI-VENUE-CONTRACT-V1.md](MULTI-VENUE-CONTRACT-V1.md)) — falta el
+  estudio descriptivo en sí, que necesita una campaña de captura más larga que las pruebas de
+  segundos usadas para validar este contrato.
 - No se publica todavía como dataset Parquet ni con catálogo de metadatos; hoy es JSONL vía
   `prediction_replay --input --out`.
+- La tolerancia de 250 ms es una observación inicial sobre una sola sesión de 200 s, no un valor
+  calibrado con más máquinas, redes o duraciones; revisar si aparece evidencia de que es
+  demasiado corta o demasiado holgada con más capturas.
