@@ -52,10 +52,15 @@ El almacén es append-only y read-only respecto a los venues: no contiene creden
 ```bash
 cargo run --release --bin prediction_replay -- \
   --input prediction-data/raw/<session>/events.jsonl \
-  --out prediction-data/normalized/<session>.jsonl
+  --out prediction-data/normalized/<session>.jsonl \
+  --l2-out prediction-data/normalized/<session>-l2.jsonl
 ```
 
-El contrato y próximos pasos están en el [plan cuantitativo](docs/QUANT-SETTLEMENT-PLAN-2026-09-18.md).
+`--l2-out` es opcional y reconstruye determinísticamente el libro L2 de una sesión CLOB (`book` +
+`price_change`), sin red. El contrato de normalización está en
+[normalized-event-v1](docs/NORMALIZED-EVENT-CONTRACT-V1.md) y el de la reconstrucción de libro en
+[CLOB L2](docs/CLOB-L2-CONTRACT-V1.md); los próximos pasos siguen en el
+[plan cuantitativo](docs/QUANT-SETTLEMENT-PLAN-2026-09-18.md).
 
 Antes de añadir cualquier forecast se validará la salud del feed, transición de rondas, timestamps
 y libro vigente.
@@ -65,4 +70,4 @@ y libro vigente.
 Este repo comparte el grafo privado [Nakamotito Knowledge](docs/KNOWLEDGE_GRAPH.md) con
 Nakamotito Trading; comparte conocimiento, no runtime ni interfaz.
 
-Para retomar trabajo, leer primero el [relevo Quant actualizado](docs/HANDOFF-QUANT-2026-09-18.md). El [relevo anterior](docs/HANDOFF-2026-09-09.md) queda como contexto histórico.
+Para retomar trabajo, leer primero el [relevo Quant más reciente](docs/HANDOFF-QUANT-2026-09-19.md). Los relevos anteriores ([2026-09-18](docs/HANDOFF-QUANT-2026-09-18.md), [2026-09-09](docs/HANDOFF-2026-09-09.md)) quedan como contexto histórico.
