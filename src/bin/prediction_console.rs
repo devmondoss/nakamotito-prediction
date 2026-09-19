@@ -1,6 +1,6 @@
 //! Prediction Console — panel local read-only para snapshots y captura de investigación.
 //!
-//! No posee una wallet, API key ni lógica de ejecución. Sus únicos procesos hijos son los dos
+//! No posee una wallet, API key ni lógica de ejecución. Sus únicos procesos hijos son los
 //! watchers de este repo; al detenerse los termina y los snapshots se eliminan.
 
 use anyhow::{Context, Result};
@@ -13,6 +13,7 @@ use axum::{
 };
 use serde_json::{json, Value};
 use std::{
+    collections::HashMap,
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -25,15 +26,53 @@ use tracing::{info, warn};
 
 const UI: &str = include_str!("../console.html");
 
-struct Watchers {
-    oracle: Option<Child>,
-    clob: Option<Child>,
+struct WatcherDef {
+    /// Clave usada en la respuesta JSON (`watchers.<key>`, `<key>` del snapshot).
+    key: &'static str,
+    bin: &'static str,
+    snapshot_file: &'static str,
 }
+
+/// Los seis watchers que la consola puede supervisar: el oracle y el CLOB de
+/// Polymarket (settlement y mercado de predicción), más el multi-venue mínimo de la
+/// fase 3 (formación de precio en Binance/Bybit, spot y perp). Ninguno ejecuta órdenes.
+const WATCHER_DEFS: &[WatcherDef] = &[
+    WatcherDef {
+        key: "oracle",
+        bin: "prediction_watch",
+        snapshot_file: "prediction-watch.json",
+    },
+    WatcherDef {
+        key: "clob",
+        bin: "prediction_clob_watch",
+        snapshot_file: "prediction-clob-watch.json",
+    },
+    WatcherDef {
+        key: "binance_spot",
+        bin: "prediction_binance_spot_watch",
+        snapshot_file: "prediction-binance-spot-watch.json",
+    },
+    WatcherDef {
+        key: "binance_perp",
+        bin: "prediction_binance_perp_watch",
+        snapshot_file: "prediction-binance-perp-watch.json",
+    },
+    WatcherDef {
+        key: "bybit_spot",
+        bin: "prediction_bybit_spot_watch",
+        snapshot_file: "prediction-bybit-spot-watch.json",
+    },
+    WatcherDef {
+        key: "bybit_perp",
+        bin: "prediction_bybit_perp_watch",
+        snapshot_file: "prediction-bybit-perp-watch.json",
+    },
+];
 
 struct AppState {
     state_dir: PathBuf,
     data_dir: PathBuf,
-    watchers: Mutex<Watchers>,
+    children: Mutex<HashMap<&'static str, Child>>,
 }
 
 fn now_ms() -> i64 {
@@ -81,21 +120,29 @@ async fn index() -> Html<&'static str> {
 }
 
 async fn snapshot(State(app): State<Arc<AppState>>) -> Json<Value> {
-    let oracle_path = app.state_dir.join("prediction-watch.json");
-    let clob_path = app.state_dir.join("prediction-clob-watch.json");
-    let (oracle, clob) = tokio::join!(read_snapshot(oracle_path), read_snapshot(clob_path));
-    let watchers = app.watchers.lock().await;
+    let snapshots = futures_util::future::join_all(
+        WATCHER_DEFS
+            .iter()
+            .map(|def| read_snapshot(app.state_dir.join(def.snapshot_file))),
+    )
+    .await;
+    let children = app.children.lock().await;
+    let mut feeds = serde_json::Map::new();
+    let mut running = serde_json::Map::new();
+    for (def, snap) in WATCHER_DEFS.iter().zip(snapshots) {
+        feeds.insert(def.key.to_string(), snap);
+        running.insert(def.key.to_string(), json!(children.contains_key(def.key)));
+    }
     Json(json!({
         "now_ms": now_ms(),
         "state_dir": app.state_dir,
         "data_dir": app.data_dir,
-        "watchers": { "oracle": watchers.oracle.is_some(), "clob": watchers.clob.is_some() },
-        "oracle": oracle,
-        "clob": clob,
+        "watchers": running,
+        "feeds": feeds,
     }))
 }
 
-fn child(bin: &str, state_dir: &PathBuf, data_dir: &PathBuf) -> std::io::Result<Child> {
+fn spawn_child(bin: &str, state_dir: &PathBuf, data_dir: &PathBuf) -> std::io::Result<Child> {
     let own_executable = std::env::current_exe()?;
     let sibling = own_executable.with_file_name(bin);
     // `cargo run` would make Cargo the direct child and can orphan the watcher when the console
@@ -129,50 +176,42 @@ fn child(bin: &str, state_dir: &PathBuf, data_dir: &PathBuf) -> std::io::Result<
 }
 
 async fn start(State(app): State<Arc<AppState>>) -> Result<Json<Value>, ConsoleError> {
-    let mut watchers = app.watchers.lock().await;
-    if watchers.oracle.is_none() {
-        watchers.oracle = Some(
-            child("prediction_watch", &app.state_dir, &app.data_dir)
-                .context("no se pudo iniciar Oracle Watch")?,
-        );
-    }
-    if watchers.clob.is_none() {
-        watchers.clob = Some(
-            child("prediction_clob_watch", &app.state_dir, &app.data_dir)
-                .context("no se pudo iniciar CLOB Watch")?,
-        );
+    let mut children = app.children.lock().await;
+    for def in WATCHER_DEFS {
+        if !children.contains_key(def.key) {
+            let child = spawn_child(def.bin, &app.state_dir, &app.data_dir)
+                .with_context(|| format!("no se pudo iniciar {}", def.bin))?;
+            children.insert(def.key, child);
+        }
     }
     info!(dir = %app.state_dir.display(), "watchers iniciados desde Prediction Console");
     Ok(Json(json!({ "ok": true })))
 }
 
 async fn stop(State(app): State<Arc<AppState>>) -> Json<Value> {
-    let mut watchers = app.watchers.lock().await;
-    stop_process(&mut watchers.oracle).await;
-    stop_process(&mut watchers.clob).await;
-    remove_snapshots(&app.state_dir).await;
-    Json(json!({ "ok": true }))
-}
-
-async fn stop_process(process: &mut Option<Child>) {
-    if let Some(child) = process.as_mut() {
+    let mut children = app.children.lock().await;
+    for (_, mut child) in children.drain() {
         if let Err(error) = child.kill().await {
             warn!("no se pudo detener watcher: {error}");
         }
     }
-    *process = None;
+    remove_snapshots(&app.state_dir).await;
+    Json(json!({ "ok": true }))
 }
 
 async fn shutdown(app: &AppState) {
-    let mut watchers = app.watchers.lock().await;
-    stop_process(&mut watchers.oracle).await;
-    stop_process(&mut watchers.clob).await;
+    let mut children = app.children.lock().await;
+    for (_, mut child) in children.drain() {
+        if let Err(error) = child.kill().await {
+            warn!("no se pudo detener watcher: {error}");
+        }
+    }
     remove_snapshots(&app.state_dir).await;
 }
 
 async fn remove_snapshots(state_dir: &PathBuf) {
-    for filename in ["prediction-watch.json", "prediction-clob-watch.json"] {
-        match tokio::fs::remove_file(state_dir.join(filename)).await {
+    for def in WATCHER_DEFS {
+        match tokio::fs::remove_file(state_dir.join(def.snapshot_file)).await {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => warn!("no se pudo eliminar snapshot efímero: {error}"),
@@ -210,10 +249,7 @@ async fn main() -> Result<()> {
     let app = Arc::new(AppState {
         state_dir: state_dir(),
         data_dir: data_dir(),
-        watchers: Mutex::new(Watchers {
-            oracle: None,
-            clob: None,
-        }),
+        children: Mutex::new(HashMap::new()),
     });
     let router = Router::new()
         .route("/", get(index))
@@ -225,10 +261,36 @@ async fn main() -> Result<()> {
     let listener = tokio::net::TcpListener::bind(address).await?;
     info!("Prediction Console disponible en http://{address}");
     axum::serve(listener, router)
-        .with_graceful_shutdown(async move {
-            let _ = tokio::signal::ctrl_c().await;
-            shutdown(&app).await;
-        })
+        .with_graceful_shutdown(shutdown_on_signal(app))
         .await?;
     Ok(())
+}
+
+/// Escuchar solo Ctrl-C (SIGINT) deja huérfanos a los watchers hijos si a la consola la
+/// para otra cosa: un `kill` simple, un supervisor de procesos o systemd mandan SIGTERM
+/// por defecto, y sin este manejador la consola muere sin ejecutar `shutdown` — los
+/// watchers siguen corriendo y capturando sin que nadie los vea. Ocurrió en esta misma
+/// sesión: una consola de prueba matada con `kill` dejó un watcher del CLOB capturando
+/// sin supervisión durante horas.
+async fn shutdown_on_signal(app: Arc<AppState>) {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut signal) => {
+                signal.recv().await;
+            }
+            Err(error) => warn!("no se pudo instalar el manejador de SIGTERM: {error}"),
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {}
+        _ = terminate => {}
+    }
+    shutdown(&app).await;
 }
