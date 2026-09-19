@@ -99,11 +99,21 @@ fn child(bin: &str, state_dir: &PathBuf, data_dir: &PathBuf) -> std::io::Result<
     let own_executable = std::env::current_exe()?;
     let sibling = own_executable.with_file_name(bin);
     // `cargo run` would make Cargo the direct child and can orphan the watcher when the console
-    // stops. Build a missing sibling once, then own the actual watcher process directly.
+    // stops. Build a missing sibling once, then own the actual watcher process directly. The
+    // fallback build must match the console's own profile: `cargo build` defaults to `debug`, so
+    // a release console would otherwise keep looking for a sibling in `target/release/` that the
+    // build never produces there.
     if !sibling.exists() {
-        let status = std::process::Command::new("cargo")
-            .args(["build", "--quiet", "--bin", bin])
-            .status()?;
+        let is_release = own_executable
+            .parent()
+            .and_then(|dir| dir.file_name())
+            .is_some_and(|name| name == "release");
+        let mut build = std::process::Command::new("cargo");
+        build.args(["build", "--quiet", "--bin", bin]);
+        if is_release {
+            build.arg("--release");
+        }
+        let status = build.status()?;
         if !status.success() {
             return Err(std::io::Error::other(format!(
                 "cargo no pudo compilar {bin}"
