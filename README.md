@@ -3,6 +3,10 @@
 Aplicación independiente de **Nakamotito Trading**. Observa oracles, rondas y libros de mercados
 de predicción; no muestra el gráfico/DOM de Trading, no reutiliza su WAL ni puede enviar órdenes.
 
+> **¿Primera vez en este repo, con cualquier agente (Claude, Codex, Antigravity, etc.)?** Empezar
+> por [`docs/BITACORA-2026-09-19.md`](docs/BITACORA-2026-09-19.md): panorama completo,
+> autocontenido, sin depender de historial de conversación previo.
+
 ## Estado actual
 
 Seis watchers read-only y efímeros, todos sobre BTC:
