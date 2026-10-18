@@ -2,4 +2,5 @@
 /prediction-state/
 /prediction-data/
 /logs/
+/nohup.out
 .DS_Store
